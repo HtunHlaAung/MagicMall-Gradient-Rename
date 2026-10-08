@@ -205,6 +205,54 @@ button.sm{padding:6px 10px;font-size:12px;}
 </div>
 
 <script>
+
+  /* ===== PATCH: match gradients by layer / group / name instead of by position =====
+   Paste this whole block at the very END of the <script>, right before </script>.
+   Later function declarations override the earlier ones, so nothing else needs editing. */
+function gradKeyList(doc){
+  const out=[];
+  function walk(items,layer,path){
+    const occ={};
+    (items||[]).forEach(it=>{
+      if(it.ty==='gf'||it.ty==='gs'){
+        const k2=layer+'|'+it.ty+'|'+(it.nm||'');
+        const k1=layer+'|'+path+'|'+it.ty+'|'+(it.nm||'');
+        occ[k1]=(occ[k1]||0)+1;
+        out.push({ref:it,ty:it.ty,nm:it.nm||'',layer,key:k1+'#'+occ[k1],key2:k2,used:false});
+      } else if(it.ty==='gr') walk(it.it,layer,path+'/'+(it.nm||'gr'));
+    });
+  }
+  function layers(ls,comp){ (ls||[]).forEach(l=>walk(l.shapes,comp+'/'+(l.nm||''),'')); }
+  layers(doc.layers,'main');
+  (doc.assets||[]).forEach(a=>layers(a.layers,'asset:'+(a.id||'?')));
+  return out;
+}
+function computeResult(){
+  const doc=JSON.parse(JSON.stringify(tgtData.json));
+  const tg=gradKeyList(doc), sg=srcData?gradKeyList(srcData.json):[];
+  const take=(s,t)=>{ t.ref.g=JSON.parse(JSON.stringify(s.ref.g)); s.used=true; t.done=true; };
+  // 1) same layer + same group path + same name (+ occurrence)
+  tg.forEach(t=>{ const s=sg.find(x=>!x.used&&x.key===t.key); if(s) take(s,t); });
+  // 2) same layer + same name
+  tg.filter(t=>!t.done).forEach(t=>{ const s=sg.find(x=>!x.used&&x.key2===t.key2); if(s) take(s,t); });
+  // 3) same name, unique in the original
+  tg.filter(t=>!t.done).forEach(t=>{ const c=sg.filter(x=>!x.used&&x.ty===t.ty&&x.nm===t.nm&&t.nm); if(c.length===1) take(c[0],t); });
+  // 4) names were lost on export: match by order inside the same layer, only if the counts agree
+  const layers=[...new Set(tg.filter(t=>!t.done).map(t=>t.layer))];
+  layers.forEach(L=>['gf','gs'].forEach(ty=>{
+    const ts=tg.filter(t=>!t.done&&t.layer===L&&t.ty===ty), ss=sg.filter(s=>!s.used&&s.layer===L&&s.ty===ty);
+    if(ts.length&&ts.length===ss.length) ts.forEach((t,i)=>take(ss[i],t));
+  }));
+  const unmatched=tg.filter(t=>!t.done).map(t=>t.layer.replace(/^main\//,'')+' → '+(t.nm||t.ty));
+  window.__unmatched=unmatched;
+  return {doc,n:tg.filter(t=>t.done).length,total:tg.length,unmatched};
+}
+// show which gradients could not be matched (they stay unchanged)
+$('btn-restore').addEventListener('click',()=>{
+  const u=window.__unmatched||[], box=$('restore-msg').firstElementChild;
+  if(u.length&&box) box.innerHTML+='<br>&#9888; Not found in the original (left as they are): '+u.join('; ');
+});
+/* ===== END PATCH ===== */
 // ---------- helpers ----------
 function isGzip(bytes){ return bytes.length>2 && bytes[0]===0x1f && bytes[1]===0x8b; }
 
