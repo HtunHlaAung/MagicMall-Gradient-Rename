@@ -263,10 +263,43 @@ function infoHtml(i){
     i.warnings.map(w=>`<br>&#9888; ${w}`).join('');
 }
 
+// Walk a lottie doc, collecting every gradient fill/stroke found, with a reference
+// to its live object (so we can mutate it directly) and a human label.
+function collectGradients(doc){
+  const found = [];
+  function walkShapes(shapes, ctxLabel, counterObj){
+    if(!Array.isArray(shapes)) return;
+    for(const it of shapes){
+      if(it.ty === 'gf' || it.ty === 'gs'){
+        counterObj.n++;
+        found.push({ ref: it, label: ctxLabel + ' — gradient ' + counterObj.n });
+      } else if(it.ty === 'gr' && Array.isArray(it.it)){
+        walkShapes(it.it, ctxLabel, counterObj);
+      }
+    }
+  }
+  function walkLayers(layers, compLabel){
+    if(!Array.isArray(layers)) return;
+    for(const l of layers){
+      const label = compLabel + (l.nm ? (' / ' + l.nm) : '');
+      const counter = {n:0};
+      walkShapes(l.shapes, label, counter);
+    }
+  }
+  walkLayers(doc.layers, 'main');
+  if(Array.isArray(doc.assets)){
+    for(const a of doc.assets){
+      if(Array.isArray(a.layers)) walkLayers(a.layers, 'asset:' + (a.id||'?'));
+    }
+  }
+  return found;
+}
+
 // Extract stop colors from a gradient's g.k (handles both animated 'a':1 and static 'a':0)
 function getStopColorSets(gradRef){
   const g = gradRef.g;
   if(!g || !g.k) return [];
+  const isAnimated = !!g.k.a || (Array.isArray(g.k.k) && g.k.a === 1) || (g.k.a === 1);
   if(g.k.a === 1 && Array.isArray(g.k.k)){
     return g.k.k.map(kf => parseStopsFlat(kf.s));
   } else if(Array.isArray(g.k.k)){
@@ -281,6 +314,36 @@ function parseStopsFlat(flat){
     stops.push({pos:flat[i*4], r:flat[i*4+1], g:flat[i*4+2], b:flat[i*4+3]});
   }
   return stops;
+}
+function rgbToHex(r,g,b){
+  const c = v => Math.round(Math.max(0,Math.min(1,v))*255).toString(16).padStart(2,'0');
+  return '#'+c(r)+c(g)+c(b);
+}
+function hexToRgb01(hex){
+  const v = hex.replace('#','');
+  return [parseInt(v.substr(0,2),16)/255, parseInt(v.substr(2,2),16)/255, parseInt(v.substr(4,2),16)/255];
+}
+function stopsToCssGradient(stops){
+  if(!stops.length) return 'transparent';
+  const parts = stops.map(s => `${rgbToHex(s.r,s.g,s.b)} ${Math.round(s.pos*100)}%`);
+  return `linear-gradient(90deg, ${parts.join(',')})`;
+}
+
+// Apply new stop colors (same colors across every keyframe / static value) to a gradient ref
+function applyStopColors(gradRef, newStops){
+  const g = gradRef.g;
+  const numStops = newStops.length;
+  function buildFlat(){
+    const flat = [];
+    for(const s of newStops) flat.push(s.pos, s.r, s.g, s.b);
+    return flat;
+  }
+  if(g.k.a === 1 && Array.isArray(g.k.k)){
+    for(const kf of g.k.k){ kf.s = buildFlat(); }
+  } else if(Array.isArray(g.k.k)){
+    g.k.k = buildFlat();
+  }
+  if(g.p !== undefined) g.p = numStops;
 }
 
 // ---------- tabs ----------
@@ -516,51 +579,14 @@ $('btn-download-edit').addEventListener('click',()=>{
   try{ GS.forEach(G=>{ if(G.dirty) writeG(G); }); const info=downloadData(editData.json,editData.wasGzip,editData.filename,'edited',$('fmt-edit').value); showMsg('edit-msg','ok',infoHtml(info)+' Only colours you changed were rewritten.'); }
   catch(e){ showMsg('edit-msg','err','Error: '+e.message); }
 });
-
-// ---------- RESTORE: gradient matching (by layer / group / name, NOT by position) ----------
-// Every gradient gets a key made of its layer name, its group path, its type and its name.
-// This keeps working when you delete strokes or gradient fills from your file,
-// because a deleted gradient simply has no partner instead of shifting all the others.
-function gradKeyList(doc){
-  const out=[];
-  function walk(items,layer,path){
-    const occ={};
-    (items||[]).forEach(it=>{
-      if(it.ty==='gf'||it.ty==='gs'){
-        const k2=layer+'|'+it.ty+'|'+(it.nm||'');
-        const k1=layer+'|'+path+'|'+it.ty+'|'+(it.nm||'');
-        occ[k1]=(occ[k1]||0)+1;
-        out.push({ref:it,ty:it.ty,nm:it.nm||'',layer,key:k1+'#'+occ[k1],key2:k2,used:false,done:false});
-      } else if(it.ty==='gr') walk(it.it,layer,path+'/'+(it.nm||'gr'));
-    });
-  }
-  function layers(ls,comp){ (ls||[]).forEach(l=>walk(l.shapes,comp+'/'+(l.nm||''),'')); }
-  layers(doc.layers,'main');
-  (doc.assets||[]).forEach(a=>layers(a.layers,'asset:'+(a.id||'?')));
-  return out;
-}
-function computeResult(){
-  const doc=JSON.parse(JSON.stringify(tgtData.json));
-  const tg=gradKeyList(doc), sg=srcData?gradKeyList(srcData.json):[];
-  const take=(s,t)=>{ t.ref.g=JSON.parse(JSON.stringify(s.ref.g)); s.used=true; t.done=true; };
-  // 1) same layer + same group path + same name (+ occurrence)
-  tg.forEach(t=>{ const s=sg.find(x=>!x.used&&x.key===t.key); if(s) take(s,t); });
-  // 2) same layer + same name
-  tg.filter(t=>!t.done).forEach(t=>{ const s=sg.find(x=>!x.used&&x.key2===t.key2); if(s) take(s,t); });
-  // 3) same name, unique in the original file
-  tg.filter(t=>!t.done).forEach(t=>{ if(!t.nm) return; const c=sg.filter(x=>!x.used&&x.ty===t.ty&&x.nm===t.nm); if(c.length===1) take(c[0],t); });
-  // 4) names were lost on export: match by order inside the same layer, only if the counts agree
-  const lays=[...new Set(tg.filter(t=>!t.done).map(t=>t.layer))];
-  lays.forEach(L=>['gf','gs'].forEach(ty=>{
-    const ts=tg.filter(t=>!t.done&&t.layer===L&&t.ty===ty), ss=sg.filter(s=>!s.used&&s.layer===L&&s.ty===ty);
-    if(ts.length&&ts.length===ss.length) ts.forEach((t,i)=>take(ss[i],t));
-  }));
-  const unmatched=tg.filter(t=>!t.done).map(t=>t.layer.replace(/^main\//,'')+' → '+(t.nm||t.ty));
-  return {doc,n:tg.filter(t=>t.done).length,total:tg.length,unmatched};
-}
-
 // ---------- RESTORE: live preview ----------
 let ranim=[null,null], rpend=false, rBefore=null;
+function computeResult(){
+  const doc=JSON.parse(JSON.stringify(tgtData.json)), grads=collectGradients(doc);
+  const src=srcData?collectGradients(srcData.json):[]; let n=0;
+  grads.forEach((g,i)=>{ if(src[i]){ g.ref.g=JSON.parse(JSON.stringify(src[i].ref.g)); n++; } });
+  return {doc,n,total:grads.length};
+}
 function refreshRestore(){ $('btn-restore').disabled=!(tgtData&&srcData); schedRPrev(); }
 function loadR(i,doc){ if(ranim[i]) ranim[i].destroy(); ranim[i]=lottie.loadAnimation({container:$('rpv'+i),renderer:'svg',loop:true,autoplay:true,animationData:doc}); }
 function schedRPrev(){
@@ -576,9 +602,7 @@ function schedRPrev(){
 }
 $('btn-restore').addEventListener('click',()=>{
   try{ const r=computeResult(); const info=downloadData(r.doc,tgtData.wasGzip,tgtData.filename,'restored',$('fmt-res').value);
-    let m=`Transplanted ${r.n} of ${r.total} gradient(s). `+infoHtml(info);
-    if(r.unmatched.length) m+='<br>&#9888; Not found in the original (left as they are): '+r.unmatched.join('; ');
-    showMsg('restore-msg','ok',m);
+    showMsg('restore-msg','ok',`Transplanted ${r.n} of ${r.total} gradient(s). `+infoHtml(info));
   }catch(e){ showMsg('restore-msg','err','Error: '+e.message); }
 });
 
