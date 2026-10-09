@@ -111,6 +111,16 @@ button.sm{padding:6px 10px;font-size:12px;}
 .fsel{background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:9px 10px;font-size:13px;}
 .gl{max-height:240px!important;}
 .chk{display:flex;gap:8px;align-items:center;font-size:12px;color:var(--sub);margin-top:6px;}
+.rtools{display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin:4px 0 12px;}
+.rtools .chk{margin:0;}
+#rsum{font-size:12px;color:var(--sub);margin:6px 0;}
+.mt{max-height:300px;overflow:auto;border:1px solid var(--border);border-radius:10px;}
+.mr{display:grid;grid-template-columns:22px 1fr 96px 70px 22px 70px;gap:8px;align-items:center;padding:7px 10px;border-bottom:1px solid var(--border);font-size:12px;}
+.mr:last-child{border-bottom:0;}.mr.off{opacity:.45;}
+.mr .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}.mr .nm small{display:block;color:var(--sub);font-size:11px;overflow:hidden;text-overflow:ellipsis;}
+.bd{font-size:10px;padding:2px 6px;border-radius:99px;text-align:center;background:rgba(110,231,183,.12);color:var(--accent2);}
+.bd.g{background:rgba(255,196,87,.14);color:#ffc457;}.bd.n{background:rgba(255,107,107,.14);color:var(--danger);}
+.sw{height:16px;border-radius:5px;border:1px solid var(--border);}
 </style>
 </head>
 <body>
@@ -136,6 +146,14 @@ button.sm{padding:6px 10px;font-size:12px;}
       <div class="drop" id="drop-tgt">Drop or click to upload (.json / .tgs)<input type="file" id="file-tgt" accept=".json,.tgs"></div>
       <div class="filename" id="name-tgt"></div>
     </div>
+    <div class="rtools">
+      <button class="secondary sm" id="btn-swap">&#8644; Swap files</button>
+      <label class="chk"><input type="checkbox" id="o-gray"> Only fix gray / broken ones</label>
+      <label class="chk"><input type="checkbox" id="o-solid" checked> Include solid fills &amp; strokes</label>
+      <label class="chk"><input type="checkbox" id="o-geo"> Also copy gradient position</label>
+    </div>
+    <div id="rsum"></div>
+    <div class="mt" id="rtable" style="display:none;"></div>
     <div class="rprev" id="rprev">
       <div><div class="cap">Before</div><div class="pv" id="rpv0"></div></div>
       <div><div class="cap">After (live preview)</div><div class="pv" id="rpv1"></div></div>
@@ -581,13 +599,87 @@ $('btn-download-edit').addEventListener('click',()=>{
 });
 // ---------- RESTORE: live preview ----------
 let ranim=[null,null], rpend=false, rBefore=null;
-function computeResult(){
-  const doc=JSON.parse(JSON.stringify(tgtData.json)), grads=collectGradients(doc);
-  const src=srcData?collectGradients(srcData.json):[]; let n=0;
-  grads.forEach((g,i)=>{ if(src[i]){ g.ref.g=JSON.parse(JSON.stringify(src[i].ref.g)); n++; } });
-  return {doc,n,total:grads.length};
+// ---- smarter restore: match by NAME (not just order), keep the target's timing, per-row control ----
+const cpJ=o=>JSON.parse(JSON.stringify(o));
+const isGradTy=t=>t==='gf'||t==='gs';
+const KIND={gf:'gradient',gs:'gradient stroke',fl:'fill',st:'stroke'};
+const propOf=it=>isGradTy(it.ty)?(it.g&&it.g.k):it.c;            // the {a,k} object holding the colours
+const animOf=P=>!!P&&P.a===1&&Array.isArray(P.k)&&P.k.length&&P.k[0]&&P.k[0].s;
+function collectItems(doc){
+  const out=[],c1={},c2={},c3={}, bump=(m,k)=>m[k]=(m[k]||0)+1;
+  function walk(list,L,path){ (list||[]).forEach(it=>{
+    if(KIND[it.ty]&&propOf(it)){ const nm=it.nm||it.ty, b=it.ty+'|'+nm;
+      out.push({ref:it,ty:it.ty,nm,layer:L.nm,where:L.full,
+        k1:L.full+'|'+path+'|'+b+'#'+bump(c1,L.full+'|'+path+'|'+b),
+        k2:L.nm+'|'+b+'#'+bump(c2,L.nm+'|'+b), k3:b+'#'+bump(c3,b)}); }
+    else if(it.ty==='gr') walk(it.it,L,path+'/'+(it.nm||'gr')); }); }
+  const layers=(ls,comp)=>(ls||[]).forEach(l=>walk(l.shapes,{nm:l.nm||'layer',full:comp+'/'+(l.nm||'layer')},''));
+  layers(doc.layers,'main'); (doc.assets||[]).forEach(a=>layers(a.layers,'asset:'+(a.id||'?')));
+  return out;
 }
-function refreshRestore(){ $('btn-restore').disabled=!(tgtData&&srcData); schedRPrev(); }
+function matchItems(T,S){
+  const used=new Set(), rows=T.map(t=>({t,s:null,how:'none',use:true}));
+  [['k1','same name + place'],['k2','same layer + name'],['k3','same name']].forEach(([k,lab])=>{
+    const m=new Map(); S.forEach((s,i)=>{ if(!used.has(i)) m.set(s[k],i); });
+    rows.forEach(r=>{ if(r.s) return; const j=m.get(r.t[k]); if(j!==undefined&&!used.has(j)){ r.s=S[j]; r.how=lab; used.add(j); } });
+  });
+  rows.forEach(r=>{ if(r.s) return; const j=S.findIndex((s,i)=>!used.has(i)&&s.ty===r.t.ty);   // last resort: next unused of same type, in order
+    if(j>=0){ r.s=S[j]; r.how='order (guess)'; used.add(j); } });
+  return rows;
+}
+const gstops=(it,st)=>(st||[]).slice(0,it.g&&it.g.p?it.g.p:(st||[]).length);   // flat array also holds alpha pairs after the p colour stops
+function colorsOf(it){ it=it.ref||it; const P=propOf(it); if(!P) return [];
+  if(isGradTy(it.ty)){ const sets=getStopColorSets(it); return gstops(it,sets[0]).map(x=>[x.r,x.g,x.b]); }
+  const c=animOf(P)?P.k[0].s:P.k; return [[c[0],c[1],c[2]]]; }
+const satOf=c=>{const M=Math.max(...c),m=Math.min(...c);return M?(M-m)/M:0;};
+const isGrayIt=it=>colorsOf(it).every(c=>satOf(c)<0.12);
+function swatch(it){ const cs=colorsOf(it); it=it.ref||it; if(!cs.length) return 'transparent';
+  if(isGradTy(it.ty)) return stopsToCssGradient(gstops(it,getStopColorSets(it)[0])); return rgbToHex(...cs[0]); }
+function transplantItem(t,s,opt){
+  const A=propOf(t.ref),B=propOf(s.ref); if(!A||!B) return;
+  if(animOf(A)&&animOf(B)&&A.k.length===B.k.length) A.k.forEach((kf,j)=>kf.s=cpJ(B.k[j].s));   // colours only: target keeps ITS keyframe timing
+  else if(!animOf(A)&&!animOf(B)) A.k=cpJ(B.k);
+  else { A.a=B.a; A.k=cpJ(B.k); }                                                                 // structure differs -> copy whole
+  if(isGradTy(t.ref.ty)){ if(s.ref.g.p!==undefined) t.ref.g.p=s.ref.g.p;
+    if(opt.geo){ ['s','e','t','h','a'].forEach(k=>{ if(s.ref[k]!==undefined) t.ref[k]=cpJ(s.ref[k]); }); } }
+}
+let rrows=[], rpair=null;
+function ropts(){ return {gray:$('o-gray').checked,solid:$('o-solid').checked,geo:$('o-geo').checked}; }
+function rebuildRows(){
+  if(!(srcData&&tgtData)){ rrows=[]; rpair=null; return; }
+  const o=ropts(), S=collectItems(srcData.json), T=collectItems(tgtData.json);
+  rrows=matchItems(T.filter(t=>o.solid||isGradTy(t.ty)),S.filter(s=>o.solid||isGradTy(s.ty)));
+  rrows.forEach(r=>{ r.use=!!r.s&&(!o.gray||isGrayIt(r.t)); });
+  rpair=[srcData,tgtData,o.solid];
+}
+function computeResult(){
+  const doc=cpJ(tgtData.json), items=collectItems(doc), o=ropts(); let n=0;
+  const byKey=new Map(items.map(i=>[i.k1,i]));
+  rrows.forEach(r=>{ if(!r.use||!r.s) return; const t=byKey.get(r.t.k1); if(t){ transplantItem(t,r.s,o); n++; } });
+  return {doc,n,total:rrows.length};
+}
+function renderRows(){
+  const box=$('rtable'); if(!rrows.length){ box.style.display='none'; $('rsum').textContent=''; return; }
+  box.style.display='block';
+  const cnt=h=>rrows.filter(r=>r.how===h).length, g=cnt('order (guess)'), none=cnt('none');
+  $('rsum').innerHTML=`${rrows.filter(r=>r.s&&r.how!=='order (guess)').length} matched by name`+(g?`, <span style="color:#ffc457">${g} guessed by order</span>`:'')+(none?`, <span style="color:var(--danger)">${none} without a match</span>`:'')+` &middot; ${rrows.filter(r=>r.use).length} will be restored`;
+  box.innerHTML=rrows.map((r,i)=>`<div class="mr ${r.use?'':'off'}"><input type="checkbox" data-i="${i}" ${r.use?'checked':''} ${r.s?'':'disabled'}>`+
+    `<div class="nm">${r.t.nm}<small>${r.t.where.replace('main/','')} &middot; ${KIND[r.t.ty]}</small></div>`+
+    `<span class="bd ${r.how==='none'?'n':(r.how==='order (guess)'?'g':'')}">${r.how==='none'?'no match':r.how}</span>`+
+    `<div class="sw" style="background:${swatch(r.t)}"></div><span style="text-align:center;color:var(--sub)">&rarr;</span>`+
+    `<div class="sw" style="background:${r.s?swatch(r.s):'transparent'}"></div></div>`).join('');
+  box.querySelectorAll('input[type=checkbox]').forEach(cb=>cb.onchange=()=>{ rrows[cb.dataset.i].use=cb.checked; renderRows(); schedRPrev(); });
+}
+function refreshRestore(force){
+  const o=ropts(); if(force||!rpair||rpair[0]!==srcData||rpair[1]!==tgtData||rpair[2]!==o.solid) rebuildRows();
+  $('btn-restore').disabled=!(tgtData&&srcData&&rrows.some(r=>r.use));
+  if(srcData&&tgtData){ const avg=d=>{const c=collectItems(d.json).flatMap(colorsOf);return c.length?c.reduce((a,x)=>a+satOf(x),0)/c.length:0;};
+    if(avg(srcData)+0.15<avg(tgtData)) showMsg('restore-msg','err','The "correct colours" file looks <b>more gray</b> than the renamed one &mdash; the two files may be swapped. Use the Swap button.'); else $('restore-msg').innerHTML=''; }
+  renderRows(); schedRPrev();
+}
+['o-gray','o-solid','o-geo'].forEach(id=>$(id).addEventListener('change',()=>refreshRestore(true)));
+$('btn-swap').addEventListener('click',()=>{ [srcData,tgtData]=[tgtData,srcData];
+  $('name-src').textContent=srcData?srcData.filename:''; $('name-tgt').textContent=tgtData?tgtData.filename:''; refreshRestore(true); });
 function loadR(i,doc){ if(ranim[i]) ranim[i].destroy(); ranim[i]=lottie.loadAnimation({container:$('rpv'+i),renderer:'svg',loop:true,autoplay:true,animationData:doc}); }
 function schedRPrev(){
   if(rpend) return; rpend=true;
