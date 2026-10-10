@@ -131,6 +131,7 @@ button.sm{padding:6px 10px;font-size:12px;}
   <div class="tabs">
     <div class="tab active" data-tab="restore">Restore Colors</div>
     <div class="tab" data-tab="edit">Edit Colors</div>
+    <div class="tab" data-tab="l2">Logo &rarr; Flag</div>
   </div>
 
   <!-- RESTORE TAB -->
@@ -219,6 +220,44 @@ button.sm{padding:6px 10px;font-size:12px;}
       </div>
     </div>
     <div id="edit-msg"></div>
+  </div>
+
+  <!-- LOGO -> FLAG TAB -->
+  <div class="panel" id="panel-l2">
+    <div class="card">
+      <div style="font-size:13px;margin-bottom:10px;color:var(--sub);">1. Template (flag / banner &mdash; .json or .tgs)</div>
+      <div class="drop" id="drop-l2t">Drop or click to upload<input type="file" id="file-l2t" accept=".json,.tgs"></div>
+      <div class="filename" id="name-l2t"></div>
+    </div>
+    <div class="card">
+      <div style="font-size:13px;margin-bottom:10px;color:var(--sub);">2. Your logo (.svg) &mdash; gradients, rounded corners and opacity are kept</div>
+      <div class="drop" id="drop-l2s">Drop or click to upload<input type="file" id="file-l2s" accept=".svg,image/svg+xml"></div>
+      <div class="filename" id="name-l2s"></div>
+    </div>
+    <div class="card">
+      <div style="font-size:13px;margin-bottom:6px;color:var(--sub);">3. Template group(s) that hold the logo (auto-selected when the name says logo / icon / not)</div>
+      <div id="l2-list"><div class="hint">Upload a template first.</div></div>
+    </div>
+    <div class="card">
+      <div class="ad-colors">
+        <label>Size <input type="text" id="l2-size" value="0.9"></label>
+        <label>Shift X <input type="text" id="l2-dx" value="0"></label>
+        <label>Shift Y <input type="text" id="l2-dy" value="0"></label>
+        <label>Horizontal motion % <input type="text" id="l2-hf" value="100"></label>
+      </div>
+      <label class="chk"><input type="checkbox" id="l2-stretch"> Stretch to the size of the template shape (use this to change the FLAG shape)</label>
+      <label class="chk"><input type="checkbox" id="l2-colors" checked> Use my logo's own colours / gradients (removes the template's fills)</label>
+      <label class="chk"><input type="checkbox" id="l2-stroke"> Keep the template's outline strokes</label>
+      <label class="chk"><input type="checkbox" id="l2-clean" checked> Telegram clean-up (start at frame 0, no hold keyframes, tidy numbers)</label>
+      <div class="hint">Horizontal motion 0 = the logo only waves vertically, 100 = same as the template.</div>
+    </div>
+    <div class="rprev" style="display:grid;max-width:300px;grid-template-columns:1fr;"><div class="pv" id="l2pv" style="background:#0e1014;"></div></div>
+    <div class="row" style="align-items:center;">
+      <button id="l2-build" disabled>Build</button>
+      <select id="l2-fmt" class="fsel"><option value="tgs">Export .tgs (Telegram)</option><option value="json">Export .json (Lottie)</option></select>
+      <button id="l2-dl" class="secondary" disabled>Download</button>
+    </div>
+    <div id="l2-msg"></div>
   </div>
 </div>
 
@@ -800,6 +839,411 @@ function mkG(it){
   Object.assign(G,P,{label:it.label,dirty:false,adapted:false,role:guessRole(it.label)});
   G.base=baseOf(G); return G;
 }
+// ================= Logo -> Flag : put an SVG logo (gradients, rounded shapes) into a template =================
+const LF=(function(){ // ---- MATH-BEGIN (no AE objects) ----
+  function lerp(a, b, t) { return [(1 - t) * a[0] + t * b[0], (1 - t) * a[1] + t * b[1]]; }
+  function dist(a, b) { var x = a[0] - b[0], y = a[1] - b[1]; return Math.sqrt(x * x + y * y); }
+  function bez(P0, c1, c2, P1, t) {
+    var a = (1 - t) * (1 - t) * (1 - t), b = 3 * (1 - t) * (1 - t) * t, c = 3 * (1 - t) * t * t, d = t * t * t;
+    return [a * P0[0] + b * c1[0] + c * c2[0] + d * P1[0], a * P0[1] + b * c1[1] + c * c2[1] + d * P1[1]];
+  }
+
+  function splitCubic(c, n) {
+    var out = [], rest = c;
+    for (var k = n; k > 1; k--) {
+      var t = 1.0 / k;
+      var a0 = lerp(rest[0], rest[1], t), a1 = lerp(rest[1], rest[2], t), a2 = lerp(rest[2], rest[3], t);
+      var b0 = lerp(a0, a1, t), b1 = lerp(a1, a2, t);
+      var m = lerp(b0, b1, t);
+      out.push([rest[0], a0, b0, m]);
+      rest = [m, b1, a2, rest[3]];
+    }
+    out.push(rest);
+    return out;
+  }
+
+  function pathToCubics(vtx, inT, outT, closed) {
+    var cubics = [], n = vtx.length, last = closed ? n : n - 1;
+    for (var k = 0; k < last; k++) {
+      var k2 = (k + 1) % n;
+      var P0 = vtx[k], P1 = vtx[k2];
+      var o = outT[k], i2 = inT[k2];
+      var straight = (o[0] === 0 && o[1] === 0 && i2[0] === 0 && i2[1] === 0);
+      var c1, c2;
+      if (straight) { c1 = lerp(P0, P1, 1 / 3); c2 = lerp(P0, P1, 2 / 3); }
+      else { c1 = [P0[0] + o[0], P0[1] + o[1]]; c2 = [P1[0] + i2[0], P1[1] + i2[1]]; }
+      cubics.push([P0, c1, c2, P1]);
+    }
+    return cubics;
+  }
+
+  function toNodes(cubics, closed, segLen, scale) {
+    var pieces = [], k, c;
+    for (k = 0; k < cubics.length; k++) {
+      c = cubics[k];
+      var L = dist(c[0], c[1]) + dist(c[1], c[2]) + dist(c[2], c[3]);
+      var n = Math.max(1, Math.ceil(L * scale / segLen));
+      if (n > 1) { var sp = splitCubic(c, n); for (var q = 0; q < sp.length; q++) pieces.push(sp[q]); }
+      else pieces.push(c);
+    }
+    var V = [pieces[0][0]], I = [[0, 0]], O = [[pieces[0][1][0] - pieces[0][0][0], pieces[0][1][1] - pieces[0][0][1]]];
+    for (k = 0; k < pieces.length; k++) {
+      c = pieces[k];
+      if (k > 0) O.push([c[1][0] - c[0][0], c[1][1] - c[0][1]]);
+      if (k < pieces.length - 1) {
+        V.push(c[3]); I.push([c[2][0] - c[3][0], c[2][1] - c[3][1]]);
+      } else if (closed) {
+        I[0] = [c[2][0] - c[3][0], c[2][1] - c[3][1]];
+      } else {
+        V.push(c[3]); I.push([c[2][0] - c[3][0], c[2][1] - c[3][1]]); O.push([0, 0]);
+      }
+    }
+    return { V: V, I: I, O: O };
+  }
+
+  // points sampled ON the cage outline (same order for every keyframe)
+  function cagePoints(vtx, inT, outT) {
+    var pts = [], n = vtx.length;
+    for (var j = 0; j < n; j++) {
+      var j2 = (j + 1) % n;
+      var P0 = vtx[j], P1 = vtx[j2];
+      var c1 = [P0[0] + outT[j][0], P0[1] + outT[j][1]];
+      var c2 = [P1[0] + inT[j2][0], P1[1] + inT[j2][1]];
+      pts.push(P0, bez(P0, c1, c2, P1, 1 / 3), bez(P0, c1, c2, P1, 2 / 3));
+    }
+    return pts;
+  }
+
+  function invert(M) {   // Gauss-Jordan with partial pivoting
+    var n = M.length, A = [], i, j, k;
+    for (i = 0; i < n; i++) { A.push(M[i].slice(0)); for (j = 0; j < n; j++) A[i].push(i === j ? 1 : 0); }
+    for (i = 0; i < n; i++) {
+      var p = i, best = Math.abs(A[i][i]);
+      for (k = i + 1; k < n; k++) if (Math.abs(A[k][i]) > best) { best = Math.abs(A[k][i]); p = k; }
+      if (best < 1e-14) throw new Error("Wave path is degenerate (cannot fit the warp).");
+      var tmp = A[i]; A[i] = A[p]; A[p] = tmp;
+      var d = A[i][i];
+      for (j = 0; j < 2 * n; j++) A[i][j] /= d;
+      for (k = 0; k < n; k++) if (k !== i) {
+        var f = A[k][i];
+        if (f !== 0) for (j = 0; j < 2 * n; j++) A[k][j] -= f * A[i][j];
+      }
+    }
+    var R = [];
+    for (i = 0; i < n; i++) R.push(A[i].slice(n));
+    return R;
+  }
+
+  // thin-plate-spline warps: src control points -> each dst set.  returns [f(x,y)->[x,y]] per dst.
+  function makeWarps(src, dsts) {
+    var n = src.length, i, j, mnx = 1e30, mny = 1e30, mxx = -1e30, mxy = -1e30;
+    for (i = 0; i < n; i++) {
+      mnx = Math.min(mnx, src[i][0]); mxx = Math.max(mxx, src[i][0]);
+      mny = Math.min(mny, src[i][1]); mxy = Math.max(mxy, src[i][1]);
+    }
+    var cx = (mnx + mxx) / 2, cy = (mny + mxy) / 2, ext = Math.max(mxx - mnx, mxy - mny, 1e-6);
+    var sx = [], sy = [];
+    for (i = 0; i < n; i++) { sx.push((src[i][0] - cx) / ext); sy.push((src[i][1] - cy) / ext); }
+    var N = n + 3, A = [];
+    for (i = 0; i < N; i++) { var row = []; for (j = 0; j < N; j++) row.push(0); A.push(row); }
+    for (i = 0; i < n; i++) {
+      for (j = 0; j < n; j++) {
+        var dx = sx[i] - sx[j], dy = sy[i] - sy[j], r2 = dx * dx + dy * dy;
+        A[i][j] = r2 > 1e-18 ? 0.5 * r2 * Math.log(r2) : 0;
+      }
+      A[i][i] += 1e-6;
+      A[i][n] = 1; A[i][n + 1] = sx[i]; A[i][n + 2] = sy[i];
+      A[n][i] = 1; A[n + 1][i] = sx[i]; A[n + 2][i] = sy[i];
+    }
+    var Ainv = invert(A);
+    function solve(rhs) {
+      var out = [];
+      for (var r = 0; r < N; r++) { var s = 0; for (var c = 0; c < N; c++) s += Ainv[r][c] * rhs[c]; out.push(s); }
+      return out;
+    }
+    var warps = [];
+    for (var d = 0; d < dsts.length; d++) {
+      var tx = [], ty = [];
+      for (i = 0; i < n; i++) { tx.push((dsts[d][i][0] - cx) / ext); ty.push((dsts[d][i][1] - cy) / ext); }
+      tx.push(0, 0, 0); ty.push(0, 0, 0);
+      warps.push(mk(solve(tx), solve(ty)));
+    }
+    function mk(CX, CY) {
+      return function (x, y) {
+        var px = (x - cx) / ext, py = (y - cy) / ext;
+        var ox = CX[n] + CX[n + 1] * px + CX[n + 2] * py, oy = CY[n] + CY[n + 1] * px + CY[n + 2] * py;
+        for (var i2 = 0; i2 < n; i2++) {
+          var dx2 = px - sx[i2], dy2 = py - sy[i2], r2b = dx2 * dx2 + dy2 * dy2;
+          if (r2b > 1e-18) { var u = 0.5 * r2b * Math.log(r2b); ox += CX[i2] * u; oy += CY[i2] * u; }
+        }
+        return [ox * ext + cx, oy * ext + cy];
+      };
+    }
+    return { warps: warps, ext: ext, cx: cx, cy: cy };
+  }
+
+  // place logo paths inside the cage (key 0), prepare subdivided nodes in cage-local space
+  // paths: [{vtx,inT,outT,closed,col}] logo space (y down).  cage0: control points at first key
+  function prepare(paths, cage0, opt) {
+    var p, k, q, cubs = [], mn = [1e30, 1e30], mx = [-1e30, -1e30];
+    for (p = 0; p < paths.length; p++) {
+      var cu = pathToCubics(paths[p].vtx, paths[p].inT, paths[p].outT, paths[p].closed);
+      cubs.push(cu);
+      for (k = 0; k < cu.length; k++) for (q = 0; q < 4; q++) {
+        var pt = cu[k][q];
+        if (pt[0] < mn[0]) mn[0] = pt[0]; if (pt[1] < mn[1]) mn[1] = pt[1];
+        if (pt[0] > mx[0]) mx[0] = pt[0]; if (pt[1] > mx[1]) mx[1] = pt[1];
+      }
+    }
+    var lw = Math.max(mx[0] - mn[0], 1e-6), lh = Math.max(mx[1] - mn[1], 1e-6);
+    var lc = [(mn[0] + mx[0]) / 2, (mn[1] + mx[1]) / 2];
+    var cmn = [1e30, 1e30], cmx = [-1e30, -1e30];
+    for (k = 0; k < cage0.length; k++) {
+      cmn[0] = Math.min(cmn[0], cage0[k][0]); cmx[0] = Math.max(cmx[0], cage0[k][0]);
+      cmn[1] = Math.min(cmn[1], cage0[k][1]); cmx[1] = Math.max(cmx[1], cage0[k][1]);
+    }
+    var cw = cmx[0] - cmn[0], ch = cmx[1] - cmn[1], cc = [(cmn[0] + cmx[0]) / 2, (cmn[1] + cmx[1]) / 2];
+    var sx = opt.size * (opt.stretch ? cw / lw : Math.min(cw / lw, ch / lh)), sy = opt.size * (opt.stretch ? ch / lh : Math.min(cw / lw, ch / lh)), s = Math.max(sx, sy);
+    var ext = Math.max(cw, ch);
+    var items = [];
+    for (p = 0; p < paths.length; p++) {
+      var nd = toNodes(cubs[p], paths[p].closed, opt.seg, s);
+      var Q = [], HI = [], HO = [];
+      for (k = 0; k < nd.V.length; k++) {
+        Q.push([cc[0] + opt.dx * ext + (nd.V[k][0] - lc[0]) * sx, cc[1] + opt.dy * ext + (nd.V[k][1] - lc[1]) * sy]);
+        HI.push([nd.I[k][0] * sx, nd.I[k][1] * sy]);
+        HO.push([nd.O[k][0] * sx, nd.O[k][1] * sy]);
+      }
+      items.push({ Q: Q, HI: HI, HO: HO, closed: paths[p].closed, col: paths[p].col });
+    }
+    items.place=function(pt){ return [cc[0]+opt.dx*ext+(pt[0]-lc[0])*sx, cc[1]+opt.dy*ext+(pt[1]-lc[1])*sy]; };
+    return items;
+  }
+
+  function evalItem(it, f, eps) {
+    var VV = [], II = [], OO = [], n = it.Q.length;
+    for (var k = 0; k < n; k++) {
+      var x = it.Q[k][0], y = it.Q[k][1];
+      var P0 = f(x, y);
+      var a = f(x + eps, y), b = f(x - eps, y), c = f(x, y + eps), d = f(x, y - eps);
+      var Jx = [(a[0] - b[0]) / (2 * eps), (a[1] - b[1]) / (2 * eps)];
+      var Jy = [(c[0] - d[0]) / (2 * eps), (c[1] - d[1]) / (2 * eps)];
+      VV.push(P0);
+      II.push([Jx[0] * it.HI[k][0] + Jy[0] * it.HI[k][1], Jx[1] * it.HI[k][0] + Jy[1] * it.HI[k][1]]);
+      OO.push([Jx[0] * it.HO[k][0] + Jy[0] * it.HO[k][1], Jx[1] * it.HO[k][0] + Jy[1] * it.HO[k][1]]);
+    }
+    return { v: VV, i: II, o: OO, closed: it.closed };
+  }
+
+  function applyXf(pt, A, Pp, S, rot) {
+    var x = (pt[0] - A[0]) * S[0] / 100, y = (pt[1] - A[1]) * S[1] / 100;
+    var r = rot * Math.PI / 180, c = Math.cos(r), s = Math.sin(r);
+    return [Pp[0] + c * x - s * y, Pp[1] + s * x + c * y];
+  }
+   return {makeWarps,prepare,evalItem,cagePoints}; })();
+let L2={tpl:null,svg:null,svgName:'',cs:[],result:null,anim:null};
+
+// ---- SVG -> beziers + fills ----
+function parseSvgLogo(text){
+  const doc=new DOMParser().parseFromString(text,'image/svg+xml'), root=doc.documentElement;
+  if(doc.querySelector('parsererror')) throw new Error('Not a valid SVG file.');
+  const grads={}; doc.querySelectorAll('linearGradient,radialGradient').forEach(g=>grads[g.getAttribute('id')]=g);
+  const MUL=(a,b)=>[a[0]*b[0]+a[2]*b[1],a[1]*b[0]+a[3]*b[1],a[0]*b[2]+a[2]*b[3],a[1]*b[2]+a[3]*b[3],a[0]*b[4]+a[2]*b[5]+a[4],a[1]*b[4]+a[3]*b[5]+a[5]];
+  const AP=(m,p)=>[m[0]*p[0]+m[2]*p[1]+m[4],m[1]*p[0]+m[3]*p[1]+m[5]];
+  function xf(str){ let m=[1,0,0,1,0,0]; (str||'').replace(/(\w+)\s*\(([^)]*)\)/g,(_,k,a)=>{ const n=a.split(/[\s,]+/).filter(Boolean).map(Number); let t=[1,0,0,1,0,0];
+    if(k==='matrix') t=n; else if(k==='translate') t=[1,0,0,1,n[0],n[1]||0]; else if(k==='scale') t=[n[0],0,0,n.length>1?n[1]:n[0],0,0];
+    else if(k==='rotate'){ const r=n[0]*Math.PI/180,c=Math.cos(r),s=Math.sin(r); t=[c,s,-s,c,0,0]; if(n.length>2) t=MUL(MUL([1,0,0,1,n[1],n[2]],t),[1,0,0,1,-n[1],-n[2]]); }
+    else if(k==='skewX') t=[1,0,Math.tan(n[0]*Math.PI/180),1,0,0]; else if(k==='skewY') t=[1,Math.tan(n[0]*Math.PI/180),0,1,0,0];
+    m=MUL(m,t); }); return m; }
+  const prop=(el,name)=>{ for(let e=el;e&&e.getAttribute;e=e.parentNode){ const st=(e.getAttribute('style')||'').match(new RegExp('(?:^|;)\\s*'+name+'\\s*:\\s*([^;]+)')); const v=st?st[1].trim():e.getAttribute(name); if(v&&v!=='inherit') return v; } return null; };
+  const num=(v,d)=>{ if(v==null||v==='') return d; return v.trim().endsWith('%')?parseFloat(v)/100:parseFloat(v); };
+  const NAMED={black:'#000000',white:'#ffffff',red:'#ff0000',green:'#008000',blue:'#0000ff',yellow:'#ffff00',gray:'#808080',grey:'#808080'};
+  function color(s){ s=(s||'').trim().toLowerCase(); if(NAMED[s]) s=NAMED[s];
+    let m=s.match(/^#([0-9a-f]{3})$/); if(m) return m[1].split('').map(c=>parseInt(c+c,16)/255);
+    m=s.match(/^#([0-9a-f]{6})/); if(m) return [0,2,4].map(i=>parseInt(m[1].substr(i,2),16)/255);
+    m=s.match(/^rgba?\(([^)]+)\)/); if(m){ const n=m[1].split(/[\s,\/]+/).map(parseFloat); return [n[0]/255,n[1]/255,n[2]/255]; } return [0,0,0]; }
+  const gattr=(g,name)=>{ for(let e=g,k=0;e&&k<8;k++){ if(e.hasAttribute(name)) return e.getAttribute(name); const h=(e.getAttribute('href')||e.getAttribute('xlink:href')||'').replace('#',''); e=h?grads[h]:null; } return null; };
+  function stopsOf(g){ for(let e=g,k=0;e&&k<8;k++){ const st=[...e.children].filter(c=>c.tagName==='stop'); if(st.length) return st.map(s=>{ const sp=prop(s,'stop-color')||'#000', so=prop(s,'stop-opacity');
+      return {o:Math.min(1,Math.max(0,num(s.getAttribute('offset'),0))),c:color(sp),a:so==null?1:parseFloat(so)}; }); const h=(e.getAttribute('href')||e.getAttribute('xlink:href')||'').replace('#',''); e=h?grads[h]:null; } return []; }
+  // --- path data -> cubic segments ---
+  function arcToCubics(p0,rx,ry,phi,fa,fs,p1){
+    if(!rx||!ry||(p0[0]===p1[0]&&p0[1]===p1[1])) return [[p0,p0,p1,p1]];
+    rx=Math.abs(rx); ry=Math.abs(ry); const c=Math.cos(phi),s=Math.sin(phi), dx=(p0[0]-p1[0])/2, dy=(p0[1]-p1[1])/2;
+    const x1=c*dx+s*dy, y1=-s*dx+c*dy, lam=x1*x1/(rx*rx)+y1*y1/(ry*ry); if(lam>1){ rx*=Math.sqrt(lam); ry*=Math.sqrt(lam); }
+    const sg=fa===fs?-1:1, q=Math.sqrt(Math.max(0,(rx*rx*ry*ry-rx*rx*y1*y1-ry*ry*x1*x1)/(rx*rx*y1*y1+ry*ry*x1*x1)))*sg;
+    const cxp=q*rx*y1/ry, cyp=-q*ry*x1/rx, cx=c*cxp-s*cyp+(p0[0]+p1[0])/2, cy=s*cxp+c*cyp+(p0[1]+p1[1])/2;
+    const ang=(ux,uy,vx,vy)=>{ const a=Math.atan2(ux*vy-uy*vx,ux*vx+uy*vy); return a; };
+    let t1=ang(1,0,(x1-cxp)/rx,(y1-cyp)/ry), dt=ang((x1-cxp)/rx,(y1-cyp)/ry,(-x1-cxp)/rx,(-y1-cyp)/ry);
+    if(!fs&&dt>0) dt-=2*Math.PI; if(fs&&dt<0) dt+=2*Math.PI;
+    const n=Math.max(1,Math.ceil(Math.abs(dt)/(Math.PI/2)-1e-9)), d=dt/n, k=4/3*Math.tan(d/4), out=[];
+    const pt=(a)=>[cx+rx*Math.cos(a)*c-ry*Math.sin(a)*s, cy+rx*Math.cos(a)*s+ry*Math.sin(a)*c];
+    const dv=(a)=>[-rx*Math.sin(a)*c-ry*Math.cos(a)*s, -rx*Math.sin(a)*s+ry*Math.cos(a)*c];
+    for(let i=0;i<n;i++){ const a0=t1+i*d,a1=a0+d, P0=i?pt(a0):p0, P1=i===n-1?p1:pt(a1), D0=dv(a0), D1=dv(a1);
+      out.push([P0,[P0[0]+k*D0[0],P0[1]+k*D0[1]],[P1[0]-k*D1[0],P1[1]-k*D1[1]],P1]); }
+    return out;
+  }
+  function parseD(d){
+    const tk=d.match(/[MmLlHhVvCcSsQqTtAaZz]|-?(?:\d*\.\d+|\d+\.?)(?:e[-+]?\d+)?/gi)||[], subs=[]; let i=0,cmd='',cur=[0,0],st=[0,0],lc=null,lq=null,segs=null;
+    const nx=()=>parseFloat(tk[i++]), line=(a,b)=>[a,a,b,b];
+    const flush=(closed)=>{ if(segs&&segs.length) subs.push({segs,closed}); segs=null; };
+    while(i<tk.length){ if(/[A-Za-z]/.test(tk[i])) cmd=tk[i++]; const rel=cmd===cmd.toLowerCase(), C=cmd.toUpperCase(); let p;
+      if(C==='Z'){ if(segs){ if(cur[0]!==st[0]||cur[1]!==st[1]) segs.push(line(cur,st)); flush(true);} cur=st; lc=lq=null; continue; }
+      if(C==='M'){ flush(false); const x=nx(),y=nx(); cur=rel?[cur[0]+x,cur[1]+y]:[x,y]; st=cur; segs=[]; cmd=rel?'l':'L'; lc=lq=null; continue; }
+      if(!segs) segs=[];
+      if(C==='L'){ const x=nx(),y=nx(); p=rel?[cur[0]+x,cur[1]+y]:[x,y]; segs.push(line(cur,p)); cur=p; lc=lq=null; }
+      else if(C==='H'){ const x=nx(); p=[rel?cur[0]+x:x,cur[1]]; segs.push(line(cur,p)); cur=p; lc=lq=null; }
+      else if(C==='V'){ const y=nx(); p=[cur[0],rel?cur[1]+y:y]; segs.push(line(cur,p)); cur=p; lc=lq=null; }
+      else if(C==='C'||C==='S'){ let c1; if(C==='C'){ const a=nx(),b=nx(); c1=rel?[cur[0]+a,cur[1]+b]:[a,b]; } else c1=lc?[2*cur[0]-lc[0],2*cur[1]-lc[1]]:cur;
+        const a2=nx(),b2=nx(),a3=nx(),b3=nx(); const c2=rel?[cur[0]+a2,cur[1]+b2]:[a2,b2]; p=rel?[cur[0]+a3,cur[1]+b3]:[a3,b3]; segs.push([cur,c1,c2,p]); cur=p; lc=c2; lq=null; }
+      else if(C==='Q'||C==='T'){ let q1; if(C==='Q'){ const a=nx(),b=nx(); q1=rel?[cur[0]+a,cur[1]+b]:[a,b]; } else q1=lq?[2*cur[0]-lq[0],2*cur[1]-lq[1]]:cur;
+        const a3=nx(),b3=nx(); p=rel?[cur[0]+a3,cur[1]+b3]:[a3,b3];
+        segs.push([cur,[cur[0]+2/3*(q1[0]-cur[0]),cur[1]+2/3*(q1[1]-cur[1])],[p[0]+2/3*(q1[0]-p[0]),p[1]+2/3*(q1[1]-p[1])],p]); cur=p; lq=q1; lc=null; }
+      else if(C==='A'){ const rx=nx(),ry=nx(),ph=nx()*Math.PI/180,fa=nx(),fs=nx(),x=nx(),y=nx(); p=rel?[cur[0]+x,cur[1]+y]:[x,y];
+        arcToCubics(cur,rx,ry,ph,fa,fs,p).forEach(s=>segs.push(s)); cur=p; lc=lq=null; }
+      else i++; }
+    flush(false); return subs;
+  }
+  function shapeSubs(el){
+    const t=el.tagName, f=n=>parseFloat(el.getAttribute(n)||0), K=0.5522847498, L=(a,b)=>[a,a,b,b];
+    if(t==='path') return parseD(el.getAttribute('d')||'');
+    if(t==='polygon'||t==='polyline'){ const n=(el.getAttribute('points')||'').trim().split(/[\s,]+/).map(Number), P=[]; for(let k=0;k+1<n.length;k+=2) P.push([n[k],n[k+1]]);
+      const segs=[]; for(let k=0;k<P.length-1;k++) segs.push(L(P[k],P[k+1])); if(t==='polygon') segs.push(L(P[P.length-1],P[0])); return [{segs,closed:t==='polygon'}]; }
+    const ell=(cx,cy,rx,ry)=>[{closed:true,segs:[[[cx+rx,cy],[cx+rx,cy+K*ry],[cx+K*rx,cy+ry],[cx,cy+ry]],[[cx,cy+ry],[cx-K*rx,cy+ry],[cx-rx,cy+K*ry],[cx-rx,cy]],[[cx-rx,cy],[cx-rx,cy-K*ry],[cx-K*rx,cy-ry],[cx,cy-ry]],[[cx,cy-ry],[cx+K*rx,cy-ry],[cx+rx,cy-K*ry],[cx+rx,cy]]]}];
+    if(t==='circle') return ell(f('cx'),f('cy'),f('r'),f('r'));
+    if(t==='ellipse') return ell(f('cx'),f('cy'),f('rx'),f('ry'));
+    if(t==='rect'){ const x=f('x'),y=f('y'),w=f('width'),h=f('height'); let rx=el.hasAttribute('rx')?f('rx'):(el.hasAttribute('ry')?f('ry'):0), ry=el.hasAttribute('ry')?f('ry'):rx; rx=Math.min(rx,w/2); ry=Math.min(ry,h/2);
+      if(!rx||!ry) return [{closed:true,segs:[L([x,y],[x+w,y]),L([x+w,y],[x+w,y+h]),L([x+w,y+h],[x,y+h]),L([x,y+h],[x,y])]}];
+      const a=K*rx,b=K*ry; return [{closed:true,segs:[L([x+rx,y],[x+w-rx,y]),[[x+w-rx,y],[x+w-rx+a,y],[x+w,y+ry-b],[x+w,y+ry]],L([x+w,y+ry],[x+w,y+h-ry]),[[x+w,y+h-ry],[x+w,y+h-ry+b],[x+w-rx+a,y+h],[x+w-rx,y+h]],
+        L([x+w-rx,y+h],[x+rx,y+h]),[[x+rx,y+h],[x+rx-a,y+h],[x,y+h-ry+b],[x,y+h-ry]],L([x,y+h-ry],[x,y+ry]),[[x,y+ry],[x,y+ry-b],[x+rx-a,y],[x+rx,y]]]}]; }
+    return [];
+  }
+  const paths=[], fills=[], SKIP={defs:1,clipPath:1,mask:1,symbol:1,style:1,title:1,desc:1,metadata:1};
+  function opac(el){ let o=1; for(let e=el;e&&e.getAttribute;e=e.parentNode){ const v=e.getAttribute('opacity'); if(v) o*=parseFloat(v); } return o; }
+  function draw(el,m){
+    let fill=prop(el,'fill'); if(fill===null) fill='#000'; if(fill==='none') return;
+    const subs=shapeSubs(el); if(!subs.length) return;
+    const bb=[1e30,1e30,-1e30,-1e30]; subs.forEach(s=>s.segs.forEach(g=>g.forEach(p=>{ bb[0]=Math.min(bb[0],p[0]); bb[1]=Math.min(bb[1],p[1]); bb[2]=Math.max(bb[2],p[0]); bb[3]=Math.max(bb[3],p[1]); })));
+    const fo=prop(el,'fill-opacity'), A=(fo==null?1:parseFloat(fo))*opac(el); let F;
+    const um=/url\(\s*['"]?#([^'")\s]+)/.exec(fill);
+    if(um&&grads[um[1]]){ const g=grads[um[1]], lin=g.tagName==='linearGradient', obb=(gattr(g,'gradientUnits')||'objectBoundingBox')!=='userSpaceOnUse';
+      let T=MUL(m,MUL(obb?[bb[2]-bb[0],0,0,bb[3]-bb[1],bb[0],bb[1]]:[1,0,0,1,0,0],xf(gattr(g,'gradientTransform'))));
+      const stops=stopsOf(g); if(!stops.length) return;
+      if(lin){ F={g:1,t:1,p1:AP(T,[num(gattr(g,'x1'),0),num(gattr(g,'y1'),0)]),p2:AP(T,[num(gattr(g,'x2'),1),num(gattr(g,'y2'),0)]),stops,a:A}; }
+      else { const cx=num(gattr(g,'cx'),.5),cy=num(gattr(g,'cy'),.5),r=num(gattr(g,'r'),.5); F={g:1,t:2,p1:AP(T,[cx,cy]),p2:AP(T,[cx+r,cy]),stops,a:A}; } }
+    else F={g:0,c:color(fill),a:A};
+    const fi=fills.push(F)-1;
+    subs.forEach(s=>{ const S=s.segs.map(g=>g.map(p=>AP(m,p))), n=S.length; if(!n) return; const V=[],I=[],O=[];
+      const closed=s.closed&&Math.hypot(S[n-1][3][0]-S[0][0][0],S[n-1][3][1]-S[0][0][1])<1e-3*(1+Math.abs(S[0][0][0]));
+      for(let k=0;k<n;k++){ V.push(S[k][0]); O.push([S[k][1][0]-S[k][0][0],S[k][1][1]-S[k][0][1]]); I.push(k?[S[k-1][2][0]-S[k-1][3][0],S[k-1][2][1]-S[k-1][3][1]]:[0,0]); }
+      if(closed) I[0]=[S[n-1][2][0]-S[n-1][3][0],S[n-1][2][1]-S[n-1][3][1]];
+      else { V.push(S[n-1][3]); O.push([0,0]); I.push([S[n-1][2][0]-S[n-1][3][0],S[n-1][2][1]-S[n-1][3][1]]); }
+      if(V.length>1) paths.push({vtx:V,inT:I,outT:O,closed,col:fi}); });
+  }
+  (function walk(node,m){ [...node.children].forEach(ch=>{ const tg=ch.tagName; if(SKIP[tg]) return; const m2=MUL(m,xf(ch.getAttribute('transform')));
+    if(tg==='g'||tg==='svg'||tg==='a') walk(ch,m2); else draw(ch,m2); }); })(root,[1,0,0,1,0,0]);
+  if(!paths.length) throw new Error('No filled shapes found in this SVG.');
+  return {paths,fills};
+}
+
+// ---- template helpers ----
+const f1=v=>Array.isArray(v)?v[0]:v;
+function bzY(o,i,x){ let lo=0,hi=1; const X=u=>3*(1-u)*(1-u)*u*o[0]+3*(1-u)*u*u*i[0]+u*u*u, Y=u=>3*(1-u)*(1-u)*u*o[1]+3*(1-u)*u*u*i[1]+u*u*u;
+  for(let n=0;n<40;n++){ const m=(lo+hi)/2; if(X(m)<x) lo=m; else hi=m; } return Y((lo+hi)/2); }
+function pathAt(kfs,t){
+  if(t<=kfs[0].t) return kfs[0].s[0]; const last=kfs[kfs.length-1]; if(t>=last.t) return last.s[0];
+  let j=0; while(kfs[j+1].t<=t) j++; const a=kfs[j],b=kfs[j+1],A=a.s[0],B=b.s[0]; let y=0;
+  if(a.h!==1){ const x=(t-a.t)/(b.t-a.t); y=bzY(a.o?[f1(a.o.x),f1(a.o.y)]:[.167,.167],a.i?[f1(a.i.x),f1(a.i.y)]:[.833,.833],x); }
+  const mix=(P,Q)=>P.map((p,k)=>p.map((c,m)=>c+(Q[k][m]-c)*y));
+  return {v:mix(A.v,B.v),i:mix(A.i,B.i),o:mix(A.o,B.o),c:A.c};
+}
+function listC(doc){
+  const out=[];
+  function visit(list,path,layer,chain){
+    const anim=list.filter(it=>it.ty==='sh'&&it.ks&&it.ks.a===1&&it.ks.k.length>1);
+    const ch=chain.concat([list]);
+    if(anim.length) out.push({list,path,layer,chain:ch,anim});
+    list.forEach(it=>{ if(it.ty==='gr'&&it.it) visit(it.it,path+' / '+(it.nm||'group'),layer,ch); });
+  }
+  const layers=ls=>(ls||[]).forEach(l=>{ if(l.shapes) visit(l.shapes,'',l.nm||'layer',[]); });
+  layers(doc.layers); (doc.assets||[]).forEach(a=>layers(a.layers));
+  return out;
+}
+const NEWTR=()=>({ty:'tr',p:{a:0,k:[0,0]},a:{a:0,k:[0,0]},s:{a:0,k:[100,100]},r:{a:0,k:0},o:{a:0,k:100},sk:{a:0,k:0},sa:{a:0,k:0}});
+function wrapHF(w,Q,hf){ if(hf>=1) return w; let m=0; Q.forEach(q=>m+=w(q[0],q[1])[0]-q[0]); m/=Q.length; return (x,y)=>{ const r=w(x,y); return [(1-hf)*(x+m)+hf*r[0],r[1]]; }; }
+
+function buildLogoFlag(tplJson,svgText,o){
+  const doc=cpJ(tplJson), cs=listC(doc), svg=parseSvgLogo(svgText);
+  if(!o.sel.length) throw new Error('Tick at least one logo group in the template.');
+  const d2=e=>e&&{x:[f1(e.x),f1(e.x)],y:[f1(e.y),f1(e.y)]}, STY={fl:1,gf:1,st:1,gs:1};
+  o.sel.forEach(ci=>{
+    const C=cs[ci], times=[...new Set([].concat(...C.anim.map(p=>p.ks.k.map(k=>k.t))))].sort((a,b)=>a-b);
+    const pts=times.map(t=>[].concat(...C.anim.map(p=>{ const s=pathAt(p.ks.k,t); return LF.cagePoints(s.v,s.i,s.o); })));
+    const items=LF.prepare(svg.paths,pts[0],o), fit=LF.makeWarps(pts[0],pts), eps=Math.max(fit.ext*1e-3,1e-3);
+    const Q=[].concat(...items.map(i=>i.Q)), W=fit.warps.map(w=>wrapHF(w,Q,o.hf));
+    const ease=t=>{ for(const p of C.anim){ const k=p.ks.k.find(k=>k.t===t); if(k) return k; } return null; };
+    const pathItem=(it,n)=>({ty:'sh',nm:'Logo path '+n,hd:false,ks:{a:1,k:times.map((t,j)=>{ const e=LF.evalItem(it,W[j],eps), k=ease(t), kf={t,s:[{i:e.i,o:e.o,v:e.v,c:e.closed}]};
+      if(k&&k.i) kf.i=k.i; if(k&&k.o) kf.o=k.o; if(k&&k.h) kf.h=k.h; return kf; })}});
+    const pointProp=p=>{ const q=items.place(p); return {a:1,k:times.map((t,j)=>{ const r=W[j](q[0],q[1]), k=ease(t), kf={t,s:[r[0],r[1]]};
+      if(k&&k.i) kf.i=d2(k.i); if(k&&k.o) kf.o=d2(k.o); if(k&&k.h) kf.h=k.h; return kf; })}; };
+    const fillItem=(F,n)=>{ if(!F.g) return {ty:'fl',nm:'Logo fill '+n,hd:false,bm:0,r:1,c:{a:0,k:[F.c[0],F.c[1],F.c[2],1]},o:{a:0,k:F.a*100}};
+      const flat=[]; F.stops.forEach(s=>flat.push(s.o,s.c[0],s.c[1],s.c[2])); const al=F.stops.some(s=>s.a<.999); if(al) F.stops.forEach(s=>flat.push(s.o,s.a));
+      return {ty:'gf',nm:'Logo gradient '+n,hd:false,bm:0,r:1,t:F.t,o:{a:0,k:F.a*100},h:{a:0,k:0},a:{a:0,k:0},g:{p:F.stops.length,k:{a:0,k:flat}},s:pointProp(F.p1),e:pointProp(F.p2)}; };
+    let newItems=[];
+    if(o.logoColors){
+      svg.fills.forEach((F,fi)=>{ const idx=items.map((it,k)=>it.col===fi?k:-1).filter(k=>k>=0); if(!idx.length) return;
+        newItems.unshift({ty:'gr',nm:'Logo shape '+(fi+1),np:idx.length+2,cix:1,bm:0,ix:fi+1,mn:'',hd:false,it:idx.map((k,n)=>pathItem(items[k],n+1)).concat([fillItem(F,fi+1),NEWTR()])}); });
+    } else newItems=items.map((it,k)=>pathItem(it,k+1));
+    const mk={ty:'__marker'}, at=C.list.indexOf(C.anim[0]); C.list.splice(at,1,mk);
+    C.anim.slice(1).forEach(p=>{ const k=C.list.indexOf(p); if(k>=0) C.list.splice(k,1); });
+    if(o.logoColors) C.chain.forEach(L=>{ for(let k=L.length-1;k>=0;k--){ const ty=L[k].ty; if((ty==='fl'||ty==='gf')||((ty==='st'||ty==='gs')&&!o.keepStroke)) L.splice(k,1); } });
+    C.list.splice(C.list.indexOf(mk),1,...newItems);
+  });
+  return doc;
+}
+
+// ---- Telegram clean-up: start at frame 0, no hold keyframes, tidy numbers ----
+function cleanForTelegram(doc){
+  const shift=doc.ip||0, len=Math.min(Math.round((doc.op-doc.ip)),Math.round(3*doc.fr));
+  (function w(o){ if(Array.isArray(o)){ o.forEach(w); return; } if(!o||typeof o!=='object') return;
+    if(o.a===1&&Array.isArray(o.k)&&o.k.length&&o.k[0]&&typeof o.k[0].t==='number'){
+      const out=[]; o.k.forEach((kf,i,ks)=>{ kf.t-=shift;
+        if(kf.h===1&&i<ks.length-1){ const t1=ks[i+1].t-shift, dim=Array.isArray(kf.s)&&typeof kf.s[0]==='number'?kf.s.length:1; delete kf.h;
+          kf.i={x:Array(dim).fill(.833),y:Array(dim).fill(.833)}; kf.o={x:Array(dim).fill(.167),y:Array(dim).fill(.167)}; out.push(kf);
+          if(t1-1>kf.t){ const c=cpJ(kf); c.t=t1-1; out.push(c); } } else out.push(kf); });
+      o.k=out; }
+    Object.values(o).forEach(w); })(doc);
+  const fix=ls=>(ls||[]).forEach(l=>{ l.ip=Math.max(l.ip-shift,0); l.op=Math.min(l.op-shift,len); if(l.st) l.st-=shift; if(l.op<=l.ip) l.op=l.ip+1; });
+  fix(doc.layers); (doc.assets||[]).forEach(a=>fix(a.layers)); doc.ip=0; doc.op=len; doc.tgs=1; delete doc.markers;
+  const r=(o,key)=>{ if(typeof o==='number') return Math.round(o*10)/10; if(Array.isArray(o)) return o.map(x=>r(x)); if(o&&typeof o==='object'){ const q={}; for(const k in o) q[k]=((k==='i'||k==='o')&&o[k]&&typeof o[k].x==='object')?o[k]:r(o[k],k); return q; } return o; };
+  return r(doc);
+}
+
+// ---- UI ----
+wireDrop('drop-l2t','file-l2t',async f=>{ try{ L2.tpl=await readFileAsData(f); $('name-l2t').textContent=f.name; listL2(); }catch(e){ showMsg('l2-msg','err','Could not read template: '+e.message); } });
+wireDrop('drop-l2s','file-l2s',async f=>{ try{ const t=await f.text(); parseSvgLogo(t); L2.svg=t; L2.svgName=f.name; $('name-l2s').textContent=f.name; $('l2-msg').innerHTML=''; l2Ready(); }catch(e){ L2.svg=null; showMsg('l2-msg','err',e.message); } });
+function listL2(){
+  L2.cs=listC(L2.tpl.json); const box=$('l2-list');
+  const guess=L2.cs.map(c=>/logo|not|icon|emblem/i.test(c.layer+c.path));
+  if(!guess.some(Boolean)) guess.fill(L2.cs.length===1);
+  box.innerHTML=L2.cs.map((c,i)=>`<label class="chk" style="margin:4px 0"><input type="checkbox" class="l2c" data-i="${i}" ${guess[i]?'checked':''}> ${c.layer}${c.path} &middot; ${c.anim.length} animated path(s)</label>`).join('')||'<div class="hint">No animated paths found in this template.</div>';
+  l2Ready();
+}
+function l2Ready(){ $('l2-build').disabled=!(L2.tpl&&L2.svg&&L2.cs.length); }
+$('l2-build').onclick=()=>{
+  try{
+    const num=(id,d)=>{ const v=parseFloat($(id).value); return isNaN(v)?d:v; };
+    const o={size:num('l2-size',.9),dx:num('l2-dx',0),dy:num('l2-dy',0),hf:clamp(num('l2-hf',100)/100,0,1),seg:14,
+      stretch:$('l2-stretch').checked,logoColors:$('l2-colors').checked,keepStroke:$('l2-stroke').checked,sel:[...document.querySelectorAll('.l2c:checked')].map(x=>+x.dataset.i)};
+    let doc=buildLogoFlag(L2.tpl.json,L2.svg,o); if($('l2-clean').checked) doc=cleanForTelegram(doc);
+    L2.result=doc; if(L2.anim) L2.anim.destroy();
+    L2.anim=lottie.loadAnimation({container:$('l2pv'),renderer:'svg',loop:true,autoplay:true,animationData:cpJ(doc)});
+    const bytes=pako.gzip(JSON.stringify(doc),{level:9}).length;
+    showMsg('l2-msg','ok',`Logo placed in ${o.sel.length} group(s). Estimated .tgs size ${(bytes/1024).toFixed(1)} KB.`+tgsCheck(doc,bytes).map(w=>`<br>&#9888; ${w}`).join(''));
+    $('l2-dl').disabled=false;
+  }catch(e){ showMsg('l2-msg','err','Error: '+e.message); }
+};
+$('l2-dl').onclick=()=>{ if(!L2.result) return; const i=downloadData(L2.result,L2.tpl.wasGzip,L2.tpl.filename,'logo',$('l2-fmt').value); showMsg('l2-msg','ok',infoHtml(i)); };
+
 </script>
 </body>
 </html>
